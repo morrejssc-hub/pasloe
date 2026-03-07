@@ -6,6 +6,7 @@ pub use s3::S3Storage;
 
 use crate::config::StorageConfig;
 use crate::event::CaptureResult;
+use crate::pasloe_client::PasloeClient;
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -19,7 +20,7 @@ pub struct StorageManager {
 }
 
 impl StorageManager {
-    pub fn new(config: &StorageConfig) -> Result<Self> {
+    pub fn new(config: &StorageConfig, client: PasloeClient) -> Result<Self> {
         let mut storages: Vec<Box<dyn Storage>> = Vec::new();
 
         if config.local.enable {
@@ -27,7 +28,7 @@ impl StorageManager {
         }
 
         if config.s3.enable {
-            storages.push(Box::new(S3Storage::new(&config.s3)?));
+            storages.push(Box::new(S3Storage::new(&config.s3, client)?));
         }
 
         Ok(Self { storages })

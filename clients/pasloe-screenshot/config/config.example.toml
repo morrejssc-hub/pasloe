@@ -6,11 +6,6 @@ api_key = "your-api-key"
 # S3 Storage Configuration
 [storage.s3]
 enable = true
-bucket = "pasloe-screenshots"
-region = "us-east-1"
-endpoint = "https://s3.amazonaws.com"
-access_key = "your-access_key"
-secret_key = "your-secret_key"
 prefix = "screenshots/"
 
 # Local Storage Configuration

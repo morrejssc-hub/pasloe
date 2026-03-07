@@ -29,11 +29,7 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3Config {
     pub enable: bool,
-    pub bucket: String,
-    pub region: String,
-    pub endpoint: String,
-    pub access_key: String,
-    pub secret_key: String,
+    #[serde(default)]
     pub prefix: String,
 }
 
@@ -160,11 +156,6 @@ impl Default for Config {
             storage: StorageConfig {
                 s3: S3Config {
                     enable: false,
-                    bucket: "pasloe-screenshots".to_string(),
-                    region: "us-east-1".to_string(),
-                    endpoint: "https://s3.amazonaws.com".to_string(),
-                    access_key: String::new(),
-                    secret_key: String::new(),
                     prefix: "screenshots/".to_string(),
                 },
                 local: LocalConfig {

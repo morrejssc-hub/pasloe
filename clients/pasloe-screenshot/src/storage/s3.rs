@@ -1,38 +1,28 @@
 use crate::config::S3Config;
 use crate::event::CaptureResult;
 use crate::storage::Storage;
+use crate::pasloe_client::PasloeClient;
 use anyhow::Result;
 use async_trait::async_trait;
-use s3::creds::Credentials;
-use s3::{Bucket, Region};
 
 pub struct S3Storage {
-    bucket: Bucket,
+    client: PasloeClient,
     prefix: String,
 }
 
 impl S3Storage {
-    pub fn new(config: &S3Config) -> Result<Self> {
-        let region = Region::Custom {
-            region: config.region.clone(),
-            endpoint: config.endpoint.clone(),
-        };
-        let credentials = Credentials::new(
-            Some(&config.access_key),
-            Some(&config.secret_key),
-            None,
-            None,
-            None,
-        )?;
-        let bucket = Bucket::new(&config.bucket, region, credentials)?;
-        Ok(Self { bucket, prefix: config.prefix.clone() })
+    pub fn new(config: &S3Config, client: PasloeClient) -> Result<Self> {
+        Ok(Self { 
+            client, 
+            prefix: config.prefix.clone() 
+        })
     }
 }
 
 #[async_trait]
 impl Storage for S3Storage {
     async fn save(&self, capture: &CaptureResult) -> Result<String> {
-        let key = format!(
+        let filename = format!(
             "{}{}_{}.png",
             self.prefix,
             capture.monitor_id,
@@ -45,7 +35,9 @@ impl Storage for S3Storage {
             image::ImageFormat::Png,
         )?;
 
-        self.bucket.put_object(&key, &buffer).await?;
-        Ok(format!("{}/{}", self.bucket.url(), key))
+        let presign = self.client.get_presigned_url(&filename, "image/png").await?;
+        self.client.upload_image(&presign.upload_url, buffer, "image/png").await?;
+        
+        Ok(presign.access_url)
     }
 }

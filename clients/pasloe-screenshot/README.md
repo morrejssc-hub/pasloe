@@ -82,10 +82,9 @@ cargo run -- capture --config config/config.toml
 | 字段 | 说明 |
 |------|------|
 | `enable` | 是否启用 S3 存储 |
-| `bucket` | S3 bucket 名称 |
-| `region` | 区域 |
-| `endpoint` | 自定义 endpoint（兼容 MinIO 等） |
-| `access_key` / `secret_key` | 认证凭据 |
+| `prefix` | S3 对象前缀（目录） |
+
+**注意**: 新版客户端的 S3 凭据由 Pasloe Server 管理，因此 `[storage.s3]` 不再需要配置 `bucket`、`endpoint` 和 `access_key`/`secret_key`。客户端会通过 API 动态获取 Presigned URL。
 
 ### `[monitors.<ID>]`
 

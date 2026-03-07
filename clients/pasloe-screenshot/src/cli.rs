@@ -106,11 +106,11 @@ async fn start_capture(
         println!("已启用本地存储，路径: {}", config.storage.local.path);
     }
 
-    // 创建存储管理器
-    let storage = StorageManager::new(&config.storage)?;
-
     // 创建 pasloe 客户端
     let pasloe_client = PasloeClient::new(config.pasloe.url.clone(), config.pasloe.api_key.clone());
+
+    // 创建存储管理器
+    let storage = StorageManager::new(&config.storage, pasloe_client.clone())?;
 
     // 创建统一捕获管理器
     let mut capture = Capture::new(config.monitors.clone(), None);
