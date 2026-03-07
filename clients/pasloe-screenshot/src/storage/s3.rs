@@ -23,7 +23,7 @@ impl S3Storage {
 impl Storage for S3Storage {
     async fn save(&self, capture: &CaptureResult) -> Result<String> {
         let filename = format!(
-            "{}{}_{}.png",
+            "{}pasloe-screenshot/{}/{}.png",
             self.prefix,
             capture.monitor_id,
             capture.timestamp.format("%Y%m%d_%H%M%S_%3f")
