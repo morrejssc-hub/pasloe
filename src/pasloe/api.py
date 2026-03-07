@@ -2,7 +2,8 @@ from datetime import datetime
 from typing import Optional, List, Any, Dict
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, Security
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,8 +11,16 @@ from .database import get_session
 from .models import SourceCreate, EventCreate, Event, WebhookCreate, Webhook
 from . import store
 from . import s3
+from .config import get_settings
 
-router = APIRouter()
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+def verify_api_key(api_key: str = Security(api_key_header)):
+    expected_api_key = get_settings().api_key
+    if expected_api_key and api_key != expected_api_key:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+
+router = APIRouter(dependencies=[Depends(verify_api_key)])
 
 class ArtifactPresignRequest(BaseModel):
     filename: str

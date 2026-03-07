@@ -66,10 +66,15 @@ async def list_sources(db: AsyncSession) -> list[SourceRecord]:
 # --- Event operations ---
 
 async def append_event(db: AsyncSession, event: EventCreate) -> EventRecord:
-    # Verify source is registered
     source = await get_source(db, event.source_id)
     if source is None:
-        raise ValueError(f"Source '{event.source_id}' is not registered.")
+        source = SourceRecord(
+            id=event.source_id,
+            kind="client",
+            metadata_={},
+            registered_at=datetime.now(timezone.utc),
+        )
+        db.add(source)
 
     record = EventRecord(
         id=uuid7(),
