@@ -13,7 +13,7 @@ Pasloe is a lightweight, append-only event store service for the Palimpsest V2 s
 
 ### 1. Configuration
 
-Copy the example environment into place and adjust S3 details or DB URL.
+Copy the example environment into place and adjust S3 details and Database Type / Credentials.
 
 ```bash
 cp .env.example .env

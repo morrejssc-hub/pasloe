@@ -4,8 +4,24 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Database configuration
-    # Default to local sqlite for development/testing
-    database_url: str = "sqlite+aiosqlite:///./events.db"
+    # Set to "sqlite" or "postgres"
+    db_type: str = "sqlite"
+
+    # SQLite config
+    sqlite_path: str = "./events.db"
+
+    # Postgres config
+    pg_user: str = "user"
+    pg_password: str = "password"
+    pg_host: str = "localhost"
+    pg_port: int = 5432
+    pg_db: str = "pasloe"
+
+    @property
+    def database_url(self) -> str:
+        if self.db_type == "postgres":
+            return f"postgresql+asyncpg://{self.pg_user}:{self.pg_password}@{self.pg_host}:{self.pg_port}/{self.pg_db}"
+        return f"sqlite+aiosqlite:///{self.sqlite_path}"
     
     # API configuration
     host: str = "0.0.0.0"
@@ -38,4 +54,4 @@ def get_db_url() -> str:
     return get_settings().database_url
 
 def is_sqlite() -> bool:
-    return get_db_url().startswith("sqlite")
+    return get_settings().db_type == "sqlite"
