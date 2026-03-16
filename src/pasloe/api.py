@@ -1,241 +1,187 @@
-from datetime import datetime
-from typing import Optional, List, Any, Dict
-from uuid import UUID
+"""FastAPI router — all HTTP endpoints."""
+from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Security
+import logging
+from datetime import datetime
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .database import get_session
-from .models import (
-    SourceCreate, EventCreate, Event,
-    # WebhookCreate, Webhook,  # TODO: Task 8 - removed in refactor
-    # EventTypeSchemaCreate, EventTypeSchema,  # TODO: Task 8 - removed in refactor
-)
+from pydantic import BaseModel, ConfigDict
+
 from . import store
-# from . import s3  # TODO: Task 8 - s3 module removed in refactor
+from .database import get_session
 from .config import get_settings
+from .models import (
+    Event,
+    EventCreate,
+    EventCreatedResponse,
+    SourceCreate,
+    SourceRecord,
+)
+from .projections import ProjectionRegistry
 
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+logger = logging.getLogger(__name__)
+router = APIRouter()
 
+# ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
 
-def verify_api_key(api_key: str = Security(api_key_header)):
-    expected_api_key = get_settings().api_key
-    if expected_api_key and api_key != expected_api_key:
-        raise HTTPException(status_code=403, detail="Invalid API Key")
-
-
-router = APIRouter(dependencies=[Depends(verify_api_key)])
-
-
-class ArtifactPresignRequest(BaseModel):
-    filename: str
-    content_type: str
-
-
-class ArtifactPresignResponse(BaseModel):
-    upload_url: str
-    access_url: str
-    object_name: str
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-# --- Source endpoints ---
+async def _require_api_key(
+    request: Request,
+    api_key: str | None = Depends(_api_key_header),
+) -> None:
+    expected = get_settings().api_key
+    if expected and api_key != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+_Auth = Depends(_require_api_key)
+
+
+# ---------------------------------------------------------------------------
+# Projection registry — injected via app state
+# ---------------------------------------------------------------------------
+
+def _get_registry(request: Request) -> ProjectionRegistry:
+    return request.app.state.projection_registry
+
+
+# ---------------------------------------------------------------------------
+# Sources
+# ---------------------------------------------------------------------------
 
 class SourceResponse(BaseModel):
     id: str
-    metadata: Dict[str, Any]
+    metadata: dict
     registered_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
-
-@router.post("/sources", response_model=SourceResponse, status_code=201)
-async def register_source(source: SourceCreate, db: AsyncSession = Depends(get_session)):
-    try:
-        record = await store.register_source(db, source)
-    except store.DuplicateSourceError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    return SourceResponse(id=record.id, metadata=record.metadata_, registered_at=record.registered_at)
+    @classmethod
+    def from_record(cls, r: SourceRecord) -> "SourceResponse":
+        return cls(id=r.id, metadata=r.metadata_ or {}, registered_at=r.registered_at)
 
 
-@router.get("/sources", response_model=List[SourceResponse])
-async def list_sources(db: AsyncSession = Depends(get_session)):
+@router.post("/sources", dependencies=[_Auth])
+async def register_source(
+    body: SourceCreate,
+    response: Response,
+    db: AsyncSession = Depends(get_session),
+) -> SourceResponse:
+    record, created = await store.register_source(db, body)
+    response.status_code = 201 if created else 200
+    return SourceResponse.from_record(record)
+
+
+@router.get("/sources", dependencies=[_Auth])
+async def list_sources(
+    db: AsyncSession = Depends(get_session),
+) -> list[SourceResponse]:
     records = await store.list_sources(db)
-    return [SourceResponse(id=r.id, metadata=r.metadata_, registered_at=r.registered_at) for r in records]
+    return [SourceResponse.from_record(r) for r in records]
 
 
-@router.get("/sources/{source_id}", response_model=SourceResponse)
-async def get_source(source_id: str, db: AsyncSession = Depends(get_session)):
+@router.get("/sources/{source_id}", dependencies=[_Auth])
+async def get_source(
+    source_id: str,
+    db: AsyncSession = Depends(get_session),
+) -> SourceResponse:
     record = await store.get_source(db, source_id)
-    if not record:
-        raise HTTPException(status_code=404, detail=f"Source '{source_id}' not found.")
-    return SourceResponse(id=record.id, metadata=record.metadata_, registered_at=record.registered_at)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Source not found")
+    return SourceResponse.from_record(record)
 
 
-# --- Schema endpoints ---
+# ---------------------------------------------------------------------------
+# Events
+# ---------------------------------------------------------------------------
 
-@router.post("/schemas", response_model=EventTypeSchema, status_code=201)
-async def register_schema(
-    schema: EventTypeSchemaCreate, db: AsyncSession = Depends(get_session)
-):
-    try:
-        record = await store.register_schema(db, schema)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return EventTypeSchema(
-        id=record.id,
+@router.post("/events", status_code=201, dependencies=[_Auth])
+async def append_event(
+    body: EventCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_session),
+) -> EventCreatedResponse:
+    registry: ProjectionRegistry = _get_registry(request)
+    record, warnings = await store.append_event(db, body, projection_registry=registry)
+    return EventCreatedResponse(
+        id=str(record.id),
         source_id=record.source_id,
         type=record.type,
-        schema_=record.schema_,
-        table_name=record.table_name,
-        start_time=record.start_time,
-        end_time=record.end_time,
+        ts=record.ts,
+        data=record.data,
+        warnings=warnings,
     )
 
 
-@router.get("/schemas", response_model=List[EventTypeSchema])
-async def list_schemas(
-    source_id: Optional[str] = Query(None),
-    type: Optional[str] = Query(None),
-    active_only: bool = Query(False),
-    db: AsyncSession = Depends(get_session),
-):
-    records = await store.list_schemas(db, source_id=source_id, type_=type, active_only=active_only)
-    return [
-        EventTypeSchema(
-            id=r.id, source_id=r.source_id, type=r.type,
-            schema_=r.schema_, table_name=r.table_name,
-            start_time=r.start_time, end_time=r.end_time,
-        )
-        for r in records
-    ]
+# Reserved query param names — must not collide with projection field names.
+_RESERVED = {"id", "source", "type", "since", "until", "cursor", "limit", "order"}
 
 
-@router.get("/schemas/{schema_id}", response_model=EventTypeSchema)
-async def get_schema(schema_id: UUID, db: AsyncSession = Depends(get_session)):
-    record = await store.get_schema(db, schema_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"Schema '{schema_id}' not found.")
-    return EventTypeSchema(
-        id=record.id, source_id=record.source_id, type=record.type,
-        schema_=record.schema_, table_name=record.table_name,
-        start_time=record.start_time, end_time=record.end_time,
-    )
-
-
-# --- Event endpoints ---
-
-@router.post("/events", response_model=Event, status_code=201)
-async def append_event(event: EventCreate, db: AsyncSession = Depends(get_session)):
-    try:
-        record = await store.append_event(db, event)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return record
-
-
-@router.get("/events", response_model=List[Event])
+@router.get("/events", dependencies=[_Auth])
 async def query_events(
+    request: Request,
     response: Response,
-    since: Optional[datetime] = Query(None),
-    until: Optional[datetime] = Query(None),
-    source: Optional[str] = Query(None),
-    type: Optional[str] = Query(None, alias="type"),
-    cursor: Optional[str] = Query(None),
-    limit: int = Query(100, ge=1, le=1000),
-    order: str = Query("asc", pattern="^(asc|desc)$"),
     db: AsyncSession = Depends(get_session),
-):
+    event_id: str | None = Query(default=None, alias="id"),
+    source: str | None = None,
+    type_: str | None = Query(default=None, alias="type"),
+    since: datetime | None = None,
+    until: datetime | None = None,
+    cursor: str | None = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+    order: str = Query(default="asc", pattern="^(asc|desc)$"),
+) -> list[Event]:
+    # Extract projection-specific filters (any non-reserved query param)
+    projection_filters = {
+        k: v
+        for k, v in request.query_params.items()
+        if k not in _RESERVED
+    }
+
+    registry: ProjectionRegistry = _get_registry(request)
+
     try:
         records, next_cursor = await store.query_events(
-            db, since=since, until=until, source=source,
-            type_=type, cursor=cursor, limit=limit, order=order,
+            db,
+            event_id=event_id,
+            source=source,
+            type_=type_,
+            since=since,
+            until=until,
+            cursor=cursor,
+            limit=limit,
+            order=order,
+            projection_filters=projection_filters or None,
+            projection_registry=registry if projection_filters else None,
         )
-    except store.InvalidCursorError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except store.InvalidCursorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     if next_cursor:
         response.headers["X-Next-Cursor"] = next_cursor
-    return records
 
-
-@router.get("/events/stats")
-async def get_stats(db: AsyncSession = Depends(get_session)) -> Dict[str, Any]:
-    return await store.get_stats(db)
-
-
-@router.get("/events/{event_id}", response_model=Event)
-async def get_event(event_id: UUID, db: AsyncSession = Depends(get_session)):
-    record = await store.get_event_by_id(db, event_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail=f"Event '{event_id}' not found.")
-    return record
-
-
-# --- Promoted table query endpoint ---
-
-@router.get("/promoted/{source_id}/{type}")
-async def query_promoted(
-    source_id: str,
-    type: str,
-    request: Request,
-    limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0),
-    db: AsyncSession = Depends(get_session),
-):
-    reserved = {"limit", "offset"}
-    filters = {k: v for k, v in request.query_params.items() if k not in reserved}
-    try:
-        rows, schema_def = await store.query_promoted(db, source_id, type, filters, limit, offset)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    result = []
-    for row in rows:
-        cleaned = {k: (str(v) if isinstance(v, UUID) else v) for k, v in row.items()}
-        result.append(cleaned)
-    return result
-
-
-# --- Webhook endpoints ---
-
-@router.post("/webhooks", response_model=Webhook, status_code=201)
-async def create_webhook(webhook: WebhookCreate, db: AsyncSession = Depends(get_session)):
-    record = await store.create_webhook(db, webhook)
-    return Webhook(
-        id=record.id, url=record.url, source_id=record.source_id,
-        event_types=record.event_types or [], secret=record.secret,
-        created_at=record.created_at,
-    )
-
-
-@router.get("/webhooks", response_model=List[Webhook])
-async def list_webhooks(db: AsyncSession = Depends(get_session)):
-    records = await store.list_webhooks(db)
     return [
-        Webhook(
-            id=r.id, url=r.url, source_id=r.source_id,
-            event_types=r.event_types or [], secret=r.secret,
-            created_at=r.created_at,
+        Event(
+            id=str(r.id),
+            source_id=r.source_id,
+            type=r.type,
+            ts=r.ts,
+            data=r.data,
         )
         for r in records
     ]
 
 
-@router.delete("/webhooks/{webhook_id}", status_code=204)
-async def delete_webhook(webhook_id: UUID, db: AsyncSession = Depends(get_session)):
-    deleted = await store.delete_webhook(db, webhook_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"Webhook '{webhook_id}' not found.")
-
-
-# --- Artifact endpoints ---
-
-@router.post("/artifacts/presign", response_model=ArtifactPresignResponse)
-async def create_artifact_presign(req: ArtifactPresignRequest):
-    try:
-        result = await s3.generate_presigned_url(req.filename, req.content_type)
-        return ArtifactPresignResponse(**result)
-    except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"S3 error: {str(e)}")
+@router.get("/events/stats", dependencies=[_Auth])
+async def get_stats(
+    db: AsyncSession = Depends(get_session),
+) -> dict:
+    return await store.get_stats(db)
