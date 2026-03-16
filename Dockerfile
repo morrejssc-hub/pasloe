@@ -25,8 +25,11 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Copy the source code
 COPY . .
 
+# Make entrypoint executable
+RUN chmod +x entrypoint.sh
+
 # Expose the port
 EXPOSE 8000
 
-# Run the server
-CMD ["uvicorn", "src.pasloe.app:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run migrations and start server
+CMD ["./entrypoint.sh"]
