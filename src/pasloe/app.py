@@ -10,6 +10,8 @@ import os
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    from .projections import ProjectionRegistry
+    app.state.projection_registry = ProjectionRegistry([])
     from .config import get_settings
     if not get_settings().allow_insecure_http:
         print("\n" + "!" * 60)
