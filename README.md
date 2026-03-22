@@ -1,6 +1,6 @@
 # Pasloe
 
-Pasloe is a lightweight, high-performance, and append-only event store service designed for the Palimpsest system. It serves as a centralized hub for streaming events, managing data sources, and triggering real-time webhooks.
+Append-only event store for the [Yoitsu](https://github.com/morrejssc-hub/yoitsu) self-evolving agent system. Serves as the shared event bus between Palimpsest (emits) and Trenni (subscribes).
 
 ## Key Features
 
