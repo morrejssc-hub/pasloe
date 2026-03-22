@@ -60,6 +60,17 @@ class EventRecord(Base):
     )
 
 
+class WebhookRecord(Base):
+    __tablename__ = "webhooks"
+
+    id = Column(String, primary_key=True)
+    url = Column(String, nullable=False, unique=True)
+    secret = Column(String, nullable=False, server_default="")
+    event_types = Column(JSON_TYPE, server_default="[]", nullable=False)
+    source_filter = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -102,3 +113,19 @@ class EventCreatedResponse(BaseModel):
     ts: datetime
     data: dict
     warnings: list[str] = Field(default_factory=list)
+
+
+class WebhookCreate(BaseModel):
+    url: str
+    secret: str = ""
+    event_types: list[str] = Field(default_factory=list)
+    source_filter: str | None = None
+
+class WebhookResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    url: str
+    secret: str
+    event_types: list[str]
+    source_filter: str | None
+    created_at: datetime
