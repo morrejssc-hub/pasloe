@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from uuid_extensions import uuid7
 
-from .models import EventCreate, EventRecord, SourceCreate, SourceRecord
+from .models import EventCreate, EventRecord, SourceCreate, SourceRecord, WebhookCreate, WebhookRecord
 
 if TYPE_CHECKING:
     from .projections import ProjectionRegistry
@@ -224,3 +224,76 @@ async def get_stats(db: AsyncSession) -> dict[str, Any]:
     by_type = {row[0]: row[1] for row in type_result.all()}
 
     return {"total_events": total, "by_source": by_source, "by_type": by_type}
+
+
+# ---------------------------------------------------------------------------
+# Webhook operations
+# ---------------------------------------------------------------------------
+
+async def create_or_update_webhook(
+    db: AsyncSession,
+    body: WebhookCreate,
+) -> WebhookRecord:
+    """Upsert webhook by URL. Returns the record (created or updated)."""
+    result = await db.execute(
+        select(WebhookRecord).where(WebhookRecord.url == body.url)
+    )
+    existing = result.scalar_one_or_none()
+    if existing is not None:
+        existing.secret = body.secret
+        existing.event_types = body.event_types
+        existing.source_filter = body.source_filter
+        await db.flush()
+        return existing
+    record = WebhookRecord(
+        id=str(uuid7()),
+        url=body.url,
+        secret=body.secret,
+        event_types=body.event_types,
+        source_filter=body.source_filter,
+    )
+    db.add(record)
+    await db.flush()
+    return record
+
+
+async def list_webhooks(db: AsyncSession) -> list[WebhookRecord]:
+    result = await db.execute(select(WebhookRecord))
+    return list(result.scalars().all())
+
+
+async def get_webhook(db: AsyncSession, webhook_id: str) -> WebhookRecord | None:
+    result = await db.execute(
+        select(WebhookRecord).where(WebhookRecord.id == webhook_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def delete_webhook(db: AsyncSession, webhook_id: str) -> bool:
+    record = await get_webhook(db, webhook_id)
+    if record is None:
+        return False
+    await db.delete(record)
+    await db.flush()
+    return True
+
+
+async def list_webhooks_for_event(
+    db: AsyncSession,
+    event_type: str,
+    source_id: str,
+) -> list[WebhookRecord]:
+    """Return webhooks that should receive this event (type + source filters)."""
+    result = await db.execute(select(WebhookRecord))
+    all_webhooks = list(result.scalars().all())
+    matches = []
+    for wh in all_webhooks:
+        # Source filter: NULL/empty means all sources
+        if wh.source_filter and wh.source_filter != source_id:
+            continue
+        # Type filter: empty list means all types
+        types = wh.event_types or []
+        if types and event_type not in types:
+            continue
+        matches.append(wh)
+    return matches
