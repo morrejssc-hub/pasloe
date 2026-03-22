@@ -125,7 +125,18 @@ class WebhookResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
     url: str
-    secret: str
+    has_secret: bool
     event_types: list[str]
     source_filter: str | None
     created_at: datetime
+
+    @classmethod
+    def from_record(cls, r: "WebhookRecord") -> "WebhookResponse":
+        return cls(
+            id=r.id,
+            url=r.url,
+            has_secret=bool(r.secret),
+            event_types=r.event_types or [],
+            source_filter=r.source_filter,
+            created_at=r.created_at,
+        )
