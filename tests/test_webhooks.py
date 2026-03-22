@@ -79,3 +79,84 @@ async def test_delete_webhook(db):
     assert deleted is True
     result = await store.get_webhook(db, wh.id)
     assert result is None
+
+
+from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime, timezone
+from src.pasloe.webhook_delivery import compute_signature, verify_signature, deliver_to_webhook
+
+
+def test_compute_signature_consistency():
+    body = b'{"type": "task.submit"}'
+    sig1 = compute_signature("secret", body)
+    sig2 = compute_signature("secret", body)
+    assert sig1 == sig2
+    assert sig1.startswith("sha256=")
+
+
+def test_verify_signature_valid():
+    body = b'{"type": "task.submit"}'
+    sig = compute_signature("secret", body)
+    assert verify_signature("secret", body, sig) is True
+
+
+def test_verify_signature_invalid():
+    body = b'{"type": "task.submit"}'
+    assert verify_signature("secret", body, "sha256=badhex") is False
+
+
+def test_verify_signature_empty_secret_skips():
+    """Empty secret = no signature check (unsigned webhook)."""
+    body = b'{}'
+    assert verify_signature("", body, "") is True
+
+
+@pytest.mark.asyncio
+async def test_deliver_to_webhook_success():
+    from src.pasloe.models import WebhookRecord
+    wh = WebhookRecord(
+        id="wh1", url="http://localhost:9999/hooks",
+        secret="sec", event_types=[], source_filter=None,
+    )
+    event_payload = {
+        "id": "e1", "source_id": "src", "type": "task.submit",
+        "ts": datetime.now(timezone.utc).isoformat(), "data": {},
+    }
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(return_value=mock_response)
+
+    with patch("src.pasloe.webhook_delivery.httpx.AsyncClient", return_value=mock_client):
+        result = await deliver_to_webhook(wh, event_payload)
+
+    assert result is True
+    mock_client.post.assert_called_once()
+    call_kwargs = mock_client.post.call_args
+    assert call_kwargs.kwargs["headers"]["X-Pasloe-Signature"].startswith("sha256=")
+
+
+@pytest.mark.asyncio
+async def test_deliver_to_webhook_retries_on_failure():
+    import httpx as _httpx
+    from src.pasloe.models import WebhookRecord
+    wh = WebhookRecord(
+        id="wh2", url="http://fail.test/hooks",
+        secret="", event_types=[], source_filter=None,
+    )
+    event_payload = {"id": "e2", "source_id": "s", "type": "x", "ts": "2026-01-01T00:00:00", "data": {}}
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = AsyncMock(side_effect=_httpx.ConnectError("refused"))
+
+    with patch("src.pasloe.webhook_delivery.httpx.AsyncClient", return_value=mock_client):
+        with patch("src.pasloe.webhook_delivery.asyncio.sleep", AsyncMock()):
+            result = await deliver_to_webhook(wh, event_payload)
+
+    assert result is False
+    assert mock_client.post.call_count == 3  # 3 attempts
