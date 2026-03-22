@@ -6,7 +6,7 @@ Append-only event store for the [Yoitsu](https://github.com/morrejssc-hub/yoitsu
 
 - **Append-Only Event Stream**: Robust storage for system events using SQLite or PostgreSQL.
 - **Modern WebUI**: A beautiful, built-in dashboard for managing webhooks and monitoring sources/events.
-- **Webhook Integration**: Asynchronous, fire-and-forget delivery of events to external services.
+- **Webhook Integration**: Asynchronous delivery of events to registered endpoints with HMAC-SHA256 signing (`X-Pasloe-Signature: sha256=<hex>`), 3-attempt exponential backoff, and per-webhook source/type filtering.
 - **Cursor-Based Pagination**: Efficient event querying using `X-Next-Cursor` for large datasets.
 - **S3 Artifact Support**: Integrated API for generating S3 presigned URLs, enabling secure client-side uploads.
 - **Multi-Client Support**: Seamlessly integrates with Rust, Python, and other clients via REST API.
@@ -60,7 +60,8 @@ Features:
 | `/events` | `POST` | Append a new event to the stream |
 | `/sources` | `GET` | List all registered data sources |
 | `/webhooks` | `GET` | List active webhook subscriptions |
-| `/webhooks` | `POST` | Register a new webhook callback |
+| `/webhooks` | `POST` | Register or update a webhook callback |
+| `/webhooks/{id}` | `DELETE` | Remove a webhook subscription |
 | `/artifacts/presign` | `POST` | Generate an S3 presigned URL for secure uploads |
 
 **Authentication**: Include `X-API-Key: <your_key>` in the headers for all requests.
