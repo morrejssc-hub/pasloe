@@ -1,6 +1,6 @@
 # Pasloe
 
-Append-only event store for the [Yoitsu](https://github.com/morrejssc-hub/yoitsu) self-evolving agent system. Serves as the shared event bus between Palimpsest (emits) and Trenni (subscribes).
+Append-only event store for the [Yoitsu](https://github.com/guan-spicy-wolf/yoitsu) stack. Pasloe stays schema-agnostic: it stores events, delivers webhooks, and paginates queries, but it does not interpret Palimpsest or Trenni contracts.
 
 ## Key Features
 
@@ -38,7 +38,7 @@ uv run uvicorn src.pasloe.app:app --host 0.0.0.0 --port 8000 --reload
 
 ---
 
-## 🖥️ Web Management UI
+## Web Management UI
 
 Pasloe includes a built-in dashboard accessible at:
 
@@ -51,7 +51,7 @@ Features:
 
 ---
 
-## 📡 API Overview
+## API Overview
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -68,13 +68,7 @@ Features:
 
 ---
 
-## 📦 Clients
-
-- **[pasloe-screenshot](clients/pasloe-screenshot)**: A Rust-based desktop client that captures screenshots, deduplicates images using dHash, and streams them to Pasloe.
-
----
-
-## 🛠️ Development
+## Development
 
 Run tests with `pytest`:
 
