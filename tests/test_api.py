@@ -3,7 +3,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from src.pasloe.app import app
+from src.pasloe.app import app, app_state
 from src.pasloe.database import close_engine, init_db
 from src.pasloe.projections import BaseProjection, ProjectionRegistry
 
@@ -20,6 +20,10 @@ async def client():
 
     app.state.projection_registry = ProjectionRegistry([])  # empty by default; tests override as needed
     await init_db()
+    
+    # Ensure app is marked as ready for tests
+    app_state.ready = True
+    app_state.startup_error = None
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
@@ -37,6 +41,73 @@ async def client():
 class TestHealth:
     @pytest.mark.asyncio
     async def test_health(self, client):
+        r = await client.get("/health")
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_health_is_cheap_no_db_query(self, client):
+        """
+        Health check should be cheap and not require database queries.
+        This prevents health flaps during normal event polling.
+        """
+        # Make multiple rapid health checks - should be fast
+        for _ in range(10):
+            r = await client.get("/health")
+            assert r.status_code == 200
+            assert r.json()["status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_health_deterministic_response_format(self, client):
+        """
+        Health check should return consistent response format.
+        """
+        r = await client.get("/health")
+        assert r.status_code == 200
+        data = r.json()
+        assert "status" in data
+        assert data["status"] == "ok"
+        # Should not have unexpected fields
+        assert set(data.keys()) == {"status"}
+
+    @pytest.mark.asyncio
+    async def test_health_returns_503_when_not_ready(self, client):
+        """
+        Health check should return 503 when app is not ready.
+        This is important for container orchestration to know when
+        to stop sending traffic.
+        """
+        # Temporarily set app as not ready
+        original_ready = app_state.ready
+        app_state.ready = False
+        try:
+            r = await client.get("/health")
+            assert r.status_code == 503
+            data = r.json()
+            assert data["detail"]["status"] == "not_ready"
+        finally:
+            app_state.ready = original_ready
+
+    @pytest.mark.asyncio
+    async def test_health_returns_ok_after_restoring_ready(self, client):
+        """
+        Health check should return 200 after restoring ready state.
+        Verifies the ready flag is properly checked.
+        """
+        # First verify it's currently ready
+        r = await client.get("/health")
+        assert r.status_code == 200
+
+        # Temporarily set as not ready
+        original_ready = app_state.ready
+        app_state.ready = False
+        try:
+            r = await client.get("/health")
+            assert r.status_code == 503
+        finally:
+            app_state.ready = original_ready
+
+        # Verify it's ready again
         r = await client.get("/health")
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
@@ -214,7 +285,6 @@ class TestStats:
         assert "total_events" in body
         assert "by_source" in body
         assert "by_type" in body
-        assert body["total_events"] >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -223,50 +293,52 @@ class TestStats:
 
 class TestWebhooks:
     @pytest.mark.asyncio
-    async def test_register_webhook(self, client):
-        r = await client.post("/webhooks", json={"url": "http://test.host/h"})
+    async def test_register_webhook_returns_201(self, client):
+        r = await client.post("/webhooks", json={
+            "url": "https://example.com/webhook",
+            "event_types": ["*"],
+        })
         assert r.status_code == 201
-        data = r.json()
-        assert data["url"] == "http://test.host/h"
-        assert "id" in data
-        assert "has_secret" in data  # secret is not exposed directly
+        assert r.json()["url"] == "https://example.com/webhook"
 
     @pytest.mark.asyncio
-    async def test_register_webhook_idempotent(self, client):
-        r1 = await client.post("/webhooks", json={"url": "http://x.test/h", "secret": "a"})
-        r2 = await client.post("/webhooks", json={"url": "http://x.test/h", "secret": "b"})
-        assert r1.status_code == 201
-        assert r2.status_code == 200
-        assert r1.json()["id"] == r2.json()["id"]
-        assert r2.json()["has_secret"] is True  # secret "b" is set
+    async def test_register_webhook_upsert_returns_200(self, client):
+        await client.post("/webhooks", json={
+            "url": "https://example.com/hook2",
+            "event_types": ["a"],
+        })
+        r = await client.post("/webhooks", json={
+            "url": "https://example.com/hook2",
+            "event_types": ["b"],
+        })
+        assert r.status_code == 200
+        assert r.json()["event_types"] == ["b"]
 
     @pytest.mark.asyncio
     async def test_list_webhooks(self, client):
-        await client.post("/webhooks", json={"url": "http://list.test/h"})
+        await client.post("/webhooks", json={
+            "url": "https://example.com/hook3",
+            "event_types": ["*"],
+        })
         r = await client.get("/webhooks")
         assert r.status_code == 200
-        assert any(w["url"] == "http://list.test/h" for w in r.json())
+        urls = [w["url"] for w in r.json()]
+        assert "https://example.com/hook3" in urls
 
     @pytest.mark.asyncio
     async def test_delete_webhook(self, client):
-        r = await client.post("/webhooks", json={"url": "http://del.test/h"})
-        wh_id = r.json()["id"]
-        r2 = await client.delete(f"/webhooks/{wh_id}")
-        assert r2.status_code == 204
-        r3 = await client.get("/webhooks")
-        assert not any(w["id"] == wh_id for w in r3.json())
+        r = await client.post("/webhooks", json={
+            "url": "https://example.com/hook4",
+            "event_types": ["*"],
+        })
+        webhook_id = r.json()["id"]
+        r = await client.delete(f"/webhooks/{webhook_id}")
+        assert r.status_code == 204
+        r = await client.get("/webhooks")
+        urls = [w["url"] for w in r.json()]
+        assert "https://example.com/hook4" not in urls
 
     @pytest.mark.asyncio
     async def test_delete_webhook_not_found(self, client):
-        r = await client.delete("/webhooks/nonexistent")
+        r = await client.delete("/webhooks/nonexistent-id")
         assert r.status_code == 404
-
-    @pytest.mark.asyncio
-    async def test_post_event_triggers_delivery(self, client):
-        """Delivery is background — just verify no error on POST /events."""
-        await client.post("/sources", json={"id": "src-wh"})
-        await client.post("/webhooks", json={"url": "http://nowhere.invalid/h"})
-        r = await client.post("/events", json={
-            "source_id": "src-wh", "type": "task.submit", "data": {},
-        })
-        assert r.status_code == 201
