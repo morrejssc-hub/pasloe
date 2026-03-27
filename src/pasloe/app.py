@@ -8,19 +8,20 @@ from . import store
 from .api import router
 from .config import get_settings
 from .database import close_engine, get_session_factory, init_db
+from .domains import discover_domains
 from .pipeline import PipelineConfig, PipelineRuntime
+
+_DOMAINS = discover_domains()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     await init_db()
-    from .projections import ProjectionRegistry
-
-    app.state.projection_registry = ProjectionRegistry([])
+    app.state.domain_registry = {domain.model_name: domain for domain in _DOMAINS}
     app.state.pipeline_runtime = PipelineRuntime(
         session_factory=get_session_factory(),
-        projection_registry=app.state.projection_registry,
+        domain_registry=app.state.domain_registry,
         config=PipelineConfig(
             poll_interval_seconds=settings.pipeline_poll_interval_seconds,
             batch_size=settings.pipeline_batch_size,
@@ -49,12 +50,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Pasloe EventStore",
-    description="Semantically-agnostic append-only event store with schema-driven data promotion.",
+    description="Semantically-agnostic append-only event store with domain detail tables.",
     version="0.2.0",
     lifespan=lifespan,
 )
 
 app.include_router(router)
+for _domain in _DOMAINS:
+    app.include_router(_domain.router)
 
 
 @app.get("/health")

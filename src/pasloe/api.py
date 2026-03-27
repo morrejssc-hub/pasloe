@@ -22,7 +22,6 @@ from .models import (
     WebhookCreate,
     WebhookResponse,
 )
-from .projections import ProjectionRegistry
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -44,14 +43,6 @@ async def _require_api_key(
 
 
 _Auth = Depends(_require_api_key)
-
-
-# ---------------------------------------------------------------------------
-# Projection registry — injected via app state
-# ---------------------------------------------------------------------------
-
-def _get_registry(request: Request) -> ProjectionRegistry:
-    return request.app.state.projection_registry
 
 
 # ---------------------------------------------------------------------------
@@ -124,13 +115,8 @@ async def append_event(
     )
 
 
-# Reserved query param names — must not collide with projection field names.
-_RESERVED = {"id", "source", "type", "since", "until", "cursor", "limit", "order"}
-
-
 @router.get("/events", dependencies=[_Auth])
 async def query_events(
-    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_session),
     event_id: str | None = Query(default=None, alias="id"),
@@ -142,15 +128,6 @@ async def query_events(
     limit: int = Query(default=100, ge=1, le=1000),
     order: str = Query(default="asc", pattern="^(asc|desc)$"),
 ) -> list[Event]:
-    # Extract projection-specific filters (any non-reserved query param)
-    projection_filters = {
-        k: v
-        for k, v in request.query_params.items()
-        if k not in _RESERVED
-    }
-
-    registry: ProjectionRegistry = _get_registry(request)
-
     try:
         records, next_cursor = await store.query_events(
             db,
@@ -162,8 +139,6 @@ async def query_events(
             cursor=cursor,
             limit=limit,
             order=order,
-            projection_filters=projection_filters or None,
-            projection_registry=registry if projection_filters else None,
         )
     except store.InvalidCursorError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

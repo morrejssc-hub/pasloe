@@ -38,6 +38,9 @@ def get_session_factory():
 
 async def init_db():
     """Create all tables."""
+    from .domains import discover_domains
+
+    discover_domains()
     async with get_engine().begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

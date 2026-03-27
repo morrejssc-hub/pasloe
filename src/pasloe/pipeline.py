@@ -11,15 +11,12 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Any
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from . import store
 from .webhook_delivery import fire_webhooks
-
-if TYPE_CHECKING:
-    from .projections import ProjectionRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -34,17 +31,17 @@ class PipelineConfig:
 
 
 class PipelineRuntime:
-    """Owns committer/projector/webhook worker tasks."""
+    """Owns committer/webhook worker tasks."""
 
     def __init__(
         self,
         *,
         session_factory: async_sessionmaker,
-        projection_registry: "ProjectionRegistry | None",
+        domain_registry: dict[str, Any],
         config: PipelineConfig,
     ) -> None:
         self._session_factory = session_factory
-        self._projection_registry = projection_registry
+        self._domain_registry = domain_registry
         self._config = config
         self._stop_event = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
@@ -56,7 +53,6 @@ class PipelineRuntime:
         self._stop_event.clear()
         self._tasks = [
             asyncio.create_task(self._committer_loop(), name="pasloe-committer"),
-            asyncio.create_task(self._projector_loop(), name="pasloe-projector"),
             asyncio.create_task(self._webhook_loop(), name="pasloe-webhook"),
         ]
         logger.info("Pasloe pipeline started (instance=%s)", self._instance_id)
@@ -106,7 +102,7 @@ class PipelineRuntime:
                             await db.commit()
                             continue
                         try:
-                            await store.commit_ingress(db, row)
+                            await store.commit_ingress(db, row, domain_registry=self._domain_registry)
                         except Exception as exc:
                             logger.exception("committer failed for ingress event %s", event_id)
                             await store.mark_ingress_retry(
@@ -121,63 +117,6 @@ class PipelineRuntime:
                 raise
             except Exception:
                 logger.exception("committer loop error")
-                await self._sleep_or_stop()
-
-    async def _projector_loop(self) -> None:
-        worker_id = f"projector-{self._instance_id}"
-        while not self._stop_event.is_set():
-            try:
-                async with self._session_factory() as db:
-                    claimed_ids = await store.claim_outbox_batch(
-                        db,
-                        pipeline=store.PIPELINE_PROJECTOR,
-                        worker_id=worker_id,
-                        limit=self._config.batch_size,
-                        lease_seconds=self._config.lease_seconds,
-                    )
-                    await db.commit()
-
-                if not claimed_ids:
-                    await self._sleep_or_stop()
-                    continue
-
-                for outbox_id in claimed_ids:
-                    async with self._session_factory() as db:
-                        row = await store.get_outbox_for_worker(
-                            db,
-                            outbox_id=outbox_id,
-                            worker_id=worker_id,
-                        )
-                        if row is None:
-                            await db.commit()
-                            continue
-                        try:
-                            warnings = await store.apply_projection_for_outbox(
-                                db,
-                                row,
-                                projection_registry=self._projection_registry,
-                            )
-                            if warnings:
-                                logger.warning(
-                                    "projection warnings for event %s: %s",
-                                    row.event_id,
-                                    "; ".join(warnings),
-                                )
-                            await store.mark_outbox_done(db, row)
-                        except Exception as exc:
-                            logger.exception("projector failed for outbox event %s", outbox_id)
-                            await store.mark_outbox_retry(
-                                db,
-                                row,
-                                error=str(exc),
-                                base_delay_seconds=self._config.retry_base_seconds,
-                                max_delay_seconds=self._config.retry_max_seconds,
-                            )
-                        await db.commit()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.exception("projector loop error")
                 await self._sleep_or_stop()
 
     async def _webhook_loop(self) -> None:
@@ -245,4 +184,3 @@ class PipelineRuntime:
             except Exception:
                 logger.exception("webhook loop error")
                 await self._sleep_or_stop()
-

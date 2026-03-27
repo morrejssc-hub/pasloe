@@ -66,7 +66,7 @@ async def test_list_webhooks_for_event_type_filter(db):
 @pytest.mark.asyncio
 async def test_list_webhooks_for_event_type_no_match(db):
     await store.create_or_update_webhook(db, WebhookCreate(
-        url="http://c.test/h", event_types=["job.completed"],
+        url="http://c.test/h", event_types=["agent.job.completed"],
     ))
     matches = await store.list_webhooks_for_event(db, "task.submit", "src1")
     assert not any(w.url == "http://c.test/h" for w in matches)

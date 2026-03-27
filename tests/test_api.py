@@ -7,8 +7,8 @@ from httpx import ASGITransport, AsyncClient
 
 from src.pasloe.app import app
 from src.pasloe.database import close_engine, get_session_factory, init_db
+from src.pasloe.domains import discover_domains
 from src.pasloe.pipeline import PipelineConfig, PipelineRuntime
-from src.pasloe.projections import BaseProjection, ProjectionRegistry
 
 pytestmark = pytest.mark.skipif(
     sys.version_info >= (3, 14),
@@ -26,11 +26,11 @@ async def client():
     from src.pasloe.config import get_settings
     get_settings.cache_clear()  # ensure fresh settings per test
 
-    app.state.projection_registry = ProjectionRegistry([])  # empty by default; tests override as needed
+    app.state.domain_registry = {domain.model_name: domain for domain in discover_domains()}
     await init_db()
     pipeline = PipelineRuntime(
         session_factory=get_session_factory(),
-        projection_registry=app.state.projection_registry,
+        domain_registry=app.state.domain_registry,
         config=PipelineConfig(
             poll_interval_seconds=0.01,
             batch_size=64,
@@ -136,27 +136,6 @@ class TestAppendEvent:
         await _wait_event_visible(client, r.json()["id"])
 
     @pytest.mark.asyncio
-    async def test_append_returns_warnings_when_projection_skips(self, client):
-        class SkipProj(BaseProjection):
-            source = "ws"
-            event_type = "typed"
-            __tablename__ = "proj_ws"
-
-            async def on_insert(self, session, event):
-                return ["bad_field"]
-
-            async def filter(self, session, event_ids, filters):
-                return event_ids
-
-        app.state.projection_registry = ProjectionRegistry([SkipProj()])
-        r = await client.post("/events", json={"source_id": "ws", "type": "typed", "data": {"bad_field": 1}})
-        assert r.status_code == 202
-        body = r.json()
-        assert body["id"] is not None
-        assert body["warnings"] == []
-        await _wait_event_visible(client, body["id"])
-
-    @pytest.mark.asyncio
     async def test_deleted_endpoint_events_by_id_gone(self, client):
         r = await client.get("/events/some-uuid")
         # Should be 404 (no such path), not 200
@@ -207,44 +186,6 @@ class TestQueryEvents:
         r = await client.get("/events?cursor=notvalid")
         assert r.status_code == 400
 
-    @pytest.mark.asyncio
-    async def test_projection_filter_ignored_when_no_projection(self, client):
-        """Unknown params are silently ignored when no matching projection."""
-        r0 = await client.post("/events", json={"source_id": "pf", "type": "t", "data": {"level": "info"}})
-        await _wait_event_visible(client, r0.json()["id"])
-        r = await client.get("/events?source=pf&type=t&level=info")
-        assert r.status_code == 200  # no error
-
-    @pytest.mark.asyncio
-    async def test_projection_filter_applied_when_projection_matches(self, client):
-        from uuid import UUID
-
-        class LevelProj(BaseProjection):
-            source = "lp"
-            event_type = "log"
-            __tablename__ = "proj_level"
-
-            async def on_insert(self, session, event):
-                return []
-
-            async def filter(self, session, event_ids, filters):
-                # Simulate: only return first id (as if filtered by level=error)
-                return event_ids[:1]
-
-        app.state.projection_registry = ProjectionRegistry([LevelProj()])
-        for _ in range(3):
-            r0 = await client.post("/events", json={"source_id": "lp", "type": "log", "data": {}})
-            await _wait_event_visible(client, r0.json()["id"])
-
-        r = await client.get("/events?source=lp&type=log&level=error")
-        assert r.status_code == 200
-        assert len(r.json()) == 1  # projection narrowed to 1
-
-
-# ---------------------------------------------------------------------------
-# Stats
-# ---------------------------------------------------------------------------
-
 class TestStats:
     @pytest.mark.asyncio
     async def test_stats(self, client):
@@ -257,6 +198,78 @@ class TestStats:
         assert "by_source" in body
         assert "by_type" in body
         assert body["total_events"] >= 1
+
+
+class TestDomainEndpoints:
+    @pytest.mark.asyncio
+    async def test_tasks_endpoint_and_stats(self, client):
+        for payload in (
+            {"source_id": "sup", "type": "supervisor.task.created", "data": {"task_id": "t1", "goal": "do work", "team": "backend"}},
+            {"source_id": "sup", "type": "supervisor.task.completed", "data": {"task_id": "t1", "summary": "done", "team": "backend"}},
+        ):
+            r = await client.post("/events", json=payload)
+            await _wait_event_visible(client, r.json()["id"])
+
+        listed = await client.get("/tasks?task_id=t1")
+        assert listed.status_code == 200
+        assert len(listed.json()) == 2
+
+        stats = await client.get("/tasks/stats?team=backend")
+        assert stats.status_code == 200
+        assert stats.json()["event_counts_by_state"]["created"] == 1
+        assert stats.json()["terminal_task_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_jobs_endpoint_and_stats(self, client):
+        for payload in (
+            {"source_id": "agent", "type": "agent.job.started", "data": {"job_id": "j1", "task_id": "t1", "role": "planner"}},
+            {"source_id": "agent", "type": "agent.job.completed", "data": {"job_id": "j1", "task_id": "t1", "summary": "ok", "role": "planner"}},
+        ):
+            r = await client.post("/events", json=payload)
+            await _wait_event_visible(client, r.json()["id"])
+
+        listed = await client.get("/jobs?job_id=j1")
+        assert listed.status_code == 200
+        assert len(listed.json()) == 2
+
+        stats = await client.get("/jobs/stats?role=planner")
+        assert stats.status_code == 200
+        assert stats.json()["event_counts_by_state"]["started"] == 1
+        assert stats.json()["terminal_job_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_llm_endpoint_and_stats(self, client):
+        for payload in (
+            {"source_id": "agent", "type": "agent.llm.request", "data": {"job_id": "j1", "model": "gpt-4o-mini", "iteration": 1}},
+            {"source_id": "agent", "type": "agent.llm.response", "data": {"job_id": "j1", "model": "gpt-4o-mini", "finish_reason": "stop", "input_tokens": 10, "output_tokens": 5, "duration_ms": 100}},
+        ):
+            r = await client.post("/events", json=payload)
+            await _wait_event_visible(client, r.json()["id"])
+
+        listed = await client.get("/llm?job_id=j1")
+        assert listed.status_code == 200
+        assert len(listed.json()) == 2
+
+        stats = await client.get("/llm/stats?model=gpt-4o-mini")
+        assert stats.status_code == 200
+        assert stats.json()["by_model"]["gpt-4o-mini"]["input_tokens"] == 10
+
+    @pytest.mark.asyncio
+    async def test_tools_endpoint_and_stats(self, client):
+        for payload in (
+            {"source_id": "agent", "type": "agent.tool.exec", "data": {"job_id": "j1", "tool_name": "bash", "tool_call_id": "tc1"}},
+            {"source_id": "agent", "type": "agent.tool.result", "data": {"job_id": "j1", "tool_name": "bash", "tool_call_id": "tc1", "success": True, "duration_ms": 12}},
+        ):
+            r = await client.post("/events", json=payload)
+            await _wait_event_visible(client, r.json()["id"])
+
+        listed = await client.get("/tools?job_id=j1")
+        assert listed.status_code == 200
+        assert len(listed.json()) == 2
+
+        stats = await client.get("/tools/stats")
+        assert stats.status_code == 200
+        assert stats.json()["by_tool"]["bash"]["successes"] == 1
 
 
 # ---------------------------------------------------------------------------

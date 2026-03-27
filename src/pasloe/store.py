@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from typing import Any
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -12,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from uuid_extensions import uuid7
 
+from .domains import model_name_from_event_type
 from .models import (
     EventCreate,
     EventRecord,
@@ -23,16 +23,12 @@ from .models import (
     WebhookRecord,
 )
 
-if TYPE_CHECKING:
-    from .projections import ProjectionRegistry
-
 logger = logging.getLogger(__name__)
 
 INGRESS_STATUS_ACCEPTED = "accepted"
 INGRESS_STATUS_COMMITTED = "committed"
 OUTBOX_STATUS_PENDING = "pending"
 OUTBOX_STATUS_DONE = "done"
-PIPELINE_PROJECTOR = "projector"
 PIPELINE_WEBHOOK = "webhook"
 
 
@@ -235,6 +231,8 @@ async def get_ingress_for_worker(
 async def commit_ingress(
     db: AsyncSession,
     ingress: IngressRecord,
+    *,
+    domain_registry: dict[str, Any] | None = None,
 ) -> EventRecord:
     """Commit one accepted ingress row into visible events + pipeline outbox."""
     await _ensure_source(db, ingress.source_id)
@@ -261,14 +259,23 @@ async def commit_ingress(
     await _ensure_outbox_row(
         db,
         event_record=event_record,
-        pipeline=PIPELINE_PROJECTOR,
-    )
-    await _ensure_outbox_row(
-        db,
-        event_record=event_record,
         pipeline=PIPELINE_WEBHOOK,
     )
     await db.flush()
+    if domain_registry:
+        domain = domain_registry.get(model_name_from_event_type(event_record.type) or "")
+        if domain is not None:
+            try:
+                async with db.begin_nested():
+                    detail = domain.detail_model.from_event(
+                        str(event_record.id),
+                        event_record.type,
+                        event_record.data or {},
+                    )
+                    db.add(detail)
+                    await db.flush()
+            except Exception:
+                logger.exception("detail row write failed for event %s (%s)", event_record.id, event_record.type)
     return event_record
 
 
@@ -436,25 +443,6 @@ def outbox_event_payload(outbox: OutboxRecord) -> dict[str, Any]:
     }
 
 
-async def apply_projection_for_outbox(
-    db: AsyncSession,
-    outbox: OutboxRecord,
-    projection_registry: "ProjectionRegistry | None",
-) -> list[str]:
-    if projection_registry is None:
-        return []
-
-    result = await db.execute(select(EventRecord).where(EventRecord.id == outbox.event_id))
-    event_record = result.scalar_one_or_none()
-    if event_record is None:
-        return [f"missing committed event for projection: {outbox.event_id}"]
-    return await projection_registry.on_event(db, event_record)
-
-
-# ---------------------------------------------------------------------------
-# Event query (committed events only)
-# ---------------------------------------------------------------------------
-
 async def query_events(
     db: AsyncSession,
     *,
@@ -466,8 +454,6 @@ async def query_events(
     cursor: str | None = None,
     limit: int = 100,
     order: str = "asc",
-    projection_filters: dict[str, str] | None = None,
-    projection_registry: "ProjectionRegistry | None" = None,
 ) -> tuple[list[EventRecord], str | None]:
     """Unified event query over committed events."""
     if event_id is not None:
@@ -512,14 +498,6 @@ async def query_events(
     if len(records) == limit:
         last = records[-1]
         next_cursor = _encode_cursor(last.ts, last.id)
-
-    if source and type_ and projection_registry and projection_filters:
-        ids = [r.id for r in records]
-        filtered_ids = await projection_registry.filter(
-            source, type_, db, ids, projection_filters
-        )
-        id_set = set(str(i) for i in filtered_ids)
-        records = [r for r in records if str(r.id) in id_set]
 
     return records, next_cursor
 
@@ -650,4 +628,3 @@ async def list_webhooks_for_event(
             continue
         matches.append(wh)
     return matches
-

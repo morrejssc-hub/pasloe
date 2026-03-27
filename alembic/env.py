@@ -10,7 +10,7 @@ from alembic import context
 # Use the installed package name (pasloe.*), not the src-layout path.
 # Run `pip install -e .` before using Alembic.
 from pasloe.models import Base
-import pasloe.projections  # noqa: F401 — triggers subclass discovery
+from pasloe.domains import discover_domains
 from pasloe.config import get_db_url
 
 config = context.config
@@ -18,6 +18,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+discover_domains()
 
 
 def get_url() -> str:
